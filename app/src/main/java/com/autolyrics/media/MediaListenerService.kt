@@ -1,6 +1,7 @@
 package com.autolyrics.media
 
 import android.content.ComponentName
+import android.content.Context
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
@@ -13,7 +14,7 @@ class MediaListenerService : NotificationListenerService() {
 
     private val sessionsListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-            pickBestSession(controllers)
+            pickBestSession(this, controllers)
         }
 
     override fun onCreate() {
@@ -23,6 +24,7 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        isConnected = true
         try {
             sessionManager.addOnActiveSessionsChangedListener(
                 sessionsListener,
@@ -34,8 +36,13 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        isConnected = false
         try {
             sessionManager.removeOnActiveSessionsChangedListener(sessionsListener)
+        } catch (_: Exception) { }
+        // Some phones (e.g. Xiaomi) drop the listener silently; ask Android to bind it again.
+        try {
+            requestRebind(ComponentName(this, MediaListenerService::class.java))
         } catch (_: Exception) { }
     }
 
@@ -50,22 +57,51 @@ class MediaListenerService : NotificationListenerService() {
             val controllers = sessionManager.getActiveSessions(
                 ComponentName(this, MediaListenerService::class.java)
             )
-            pickBestSession(controllers)
+            pickBestSession(this, controllers)
         } catch (_: SecurityException) { }
     }
 
-    private fun pickBestSession(controllers: List<MediaController>?) {
-        val filtered = controllers?.filter { it.packageName != packageName }
-        if (filtered.isNullOrEmpty()) {
-            MediaTracker.getInstance(this).onMediaSessionChanged(null)
-            return
+    companion object {
+        /** True while Android has this listener bound and delivering callbacks. */
+        @Volatile
+        var isConnected: Boolean = false
+            private set
+
+        /**
+         * Re-reads the active media sessions right now, without waiting for a system callback,
+         * and asks Android to rebind the listener if it is enabled but not connected.
+         * Returns false when notification access is not granted.
+         */
+        fun refreshNow(context: Context): Boolean {
+            val app = context.applicationContext
+            val component = ComponentName(app, MediaListenerService::class.java)
+            return try {
+                val manager = app.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+                pickBestSession(app, manager.getActiveSessions(component))
+                if (!isConnected) {
+                    NotificationListenerService.requestRebind(component)
+                }
+                true
+            } catch (_: SecurityException) {
+                false
+            } catch (_: Exception) {
+                false
+            }
         }
 
-        val playing = filtered.firstOrNull { controller ->
-            controller.playbackState?.state == PlaybackState.STATE_PLAYING
-        }
+        private fun pickBestSession(context: Context, controllers: List<MediaController>?) {
+            val filtered = controllers?.filter { it.packageName != context.packageName }
+            if (filtered.isNullOrEmpty()) {
+                MediaTracker.getInstance(context).onMediaSessionChanged(null)
+                return
+            }
 
-        val best = playing ?: filtered.first()
-        MediaTracker.getInstance(this).onMediaSessionChanged(best)
+            val playing = filtered.firstOrNull { controller ->
+                controller.playbackState?.state == PlaybackState.STATE_PLAYING
+            }
+
+            val best = playing ?: filtered.first()
+            MediaTracker.getInstance(context).onMediaSessionChanged(best)
+        }
     }
 }

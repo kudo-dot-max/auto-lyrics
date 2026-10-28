@@ -40,6 +40,7 @@ import com.autolyrics.media.MediaTracker
 import com.autolyrics.model.AlbumColors
 import com.autolyrics.model.LyricsState
 import com.autolyrics.model.LyricsStatus
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -53,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var btnPermission: Button
     private lateinit var btnChooseLyrics: Button
+    private lateinit var btnRefreshSessions: Button
     private var pickerJob: kotlinx.coroutines.Job? = null
     private lateinit var ivAlbumArt: ImageView
     private lateinit var tvTrack: TextView
@@ -125,6 +127,29 @@ class MainActivity : AppCompatActivity() {
 
         btnChooseLyrics = findViewById(R.id.btn_choose_lyrics)
         btnChooseLyrics.setOnClickListener { showLyricsPicker() }
+
+        btnRefreshSessions = findViewById(R.id.btn_refresh_sessions)
+        btnRefreshSessions.setOnClickListener {
+            val ok = MediaListenerService.refreshNow(this)
+            Toast.makeText(
+                this,
+                if (ok) "Checking for playing music…" else "Notification access is not enabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        // While nothing is detected, keep re-reading the media sessions in case Android dropped
+        // the notification listener connection (common on Xiaomi and other aggressive battery managers).
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    if (mediaTracker.state.value.status == LyricsStatus.NO_MEDIA) {
+                        MediaListenerService.refreshNow(this@MainActivity)
+                    }
+                    delay(3000)
+                }
+            }
+        }
 
         findViewById<Button>(R.id.btn_delay_minus).setOnClickListener {
             mediaTracker.adjustOffset(-100)
@@ -249,6 +274,8 @@ class MainActivity : AppCompatActivity() {
                     applyThemeColors(state.albumColors)
                     btnChooseLyrics.visibility =
                         if (state.track != null) View.VISIBLE else View.GONE
+                    btnRefreshSessions.visibility =
+                        if (state.track == null) View.VISIBLE else View.GONE
 
                     if (state.track != null) {
                         val artistText = if (state.track.artist.isNotBlank())
