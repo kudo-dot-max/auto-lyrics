@@ -10,8 +10,11 @@ import java.util.concurrent.TimeUnit
 object SyncLrcClient {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        // Each lookup tries three lyric types in a row; cap every call so a slow or
+        // unreachable server cannot stall the fallback to LRCLIB for minutes.
+        .callTimeout(8, TimeUnit.SECONDS)
         .build()
 
     private val gson = Gson()

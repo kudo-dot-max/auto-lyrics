@@ -72,6 +72,10 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         private const val SUBTITLE_KARAOKE_WINDOW_MS = 300L
         private const val SESSION_REFRESH_MS = 1500L
         private const val PLAIN_LOOP_DELAY_MS = 2000L
+        // The Now-Playing card cuts long subtitles with "…". Long lines are split into
+        // chunks of at most this many characters and shown one chunk at a time.
+        private const val SUBTITLE_MAX_CHARS = 36
+        private const val CHUNK_SPAN_CAP_MS = 7000L
     }
 
     override fun onCreate() {
@@ -432,6 +436,78 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
         lastKaraokeText = null
     }
 
+    /**
+     * Splits [text] into pieces of at most [maxChars] characters, breaking between words and
+     * balancing the pieces so the last one is not a single stray word.
+     */
+    private fun splitIntoChunks(text: String, maxChars: Int): List<String> {
+        val clean = text.trim()
+        if (clean.length <= maxChars) return listOf(clean)
+
+        // Words longer than a chunk (no spaces, e.g. some scripts) are cut hard.
+        val tokens = mutableListOf<String>()
+        for (t in clean.split(Regex("\\s+")).filter { it.isNotEmpty() }) {
+            var rest = t
+            while (rest.length > maxChars) {
+                tokens.add(rest.substring(0, maxChars))
+                rest = rest.substring(maxChars)
+            }
+            if (rest.isNotEmpty()) tokens.add(rest)
+        }
+
+        fun pack(limit: Int): List<String> {
+            val out = mutableListOf<String>()
+            val cur = StringBuilder()
+            for (t in tokens) {
+                if (cur.isNotEmpty() && cur.length + 1 + t.length > limit) {
+                    out.add(cur.toString()); cur.clear()
+                }
+                if (cur.isNotEmpty()) cur.append(' ')
+                cur.append(t)
+            }
+            if (cur.isNotEmpty()) out.add(cur.toString())
+            return out
+        }
+
+        // Fewest chunks first, then the smallest limit that keeps that count (even pieces).
+        val minCount = pack(maxChars).size
+        var limit = maxChars
+        while (limit > 1 && pack(limit - 1).size == minCount) limit--
+        return pack(limit)
+    }
+
+    /** Picks the chunk to show given how far (0..1) we are through the line. */
+    private fun pickChunk(chunks: List<String>, fraction: Float): Int {
+        if (chunks.size <= 1) return 0
+        val total = chunks.sumOf { it.length }.coerceAtLeast(1)
+        var acc = 0
+        for (i in chunks.indices) {
+            acc += chunks[i].length
+            if (fraction * total < acc) return i
+        }
+        return chunks.lastIndex
+    }
+
+    /** Shows the part of [text] that matches [fraction] of the way through the line. */
+    private fun chunkAt(text: String, fraction: Float): String {
+        val chunks = splitIntoChunks(text, SUBTITLE_MAX_CHARS)
+        return chunks[pickChunk(chunks, fraction)]
+    }
+
+    /** Translation is split into as many parts as the original and follows the same index. */
+    private fun translationAt(trans: String, parts: Int, index: Int): String {
+        if (parts <= 1) return chunkAt(trans, 0f)
+        val words = trans.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.size <= 1) return trans.trim()
+        val per = (words.size + parts - 1) / parts
+        val from = (index * per).coerceAtMost(words.size - 1)
+        val to = minOf(words.size, from + per)
+        return words.subList(from, to).joinToString(" ")
+    }
+
+    private fun combine(original: String, trans: String?): String =
+        if (trans != null) "$original\n$trans" else original
+
     private fun getSubtitleText(state: LyricsState): String {
         val posMs = getAaPositionMs()
 
@@ -439,13 +515,39 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             val lineIdx = findLineIndex(state.lines, posMs)
             val line = state.lines.getOrNull(lineIdx)
             if (line != null) {
-                val original = if (aaKaraokeEnabled && line.words.isNotEmpty()) {
+                val trans = state.translatedLines?.getOrNull(lineIdx)?.takeIf { it.isNotBlank() }
+                val karaoke = aaKaraokeEnabled && line.words.isNotEmpty()
+                val full = if (karaoke) {
                     buildKaraokeText(line, lineIdx, posMs, SUBTITLE_KARAOKE_WINDOW_MS)
                 } else {
                     line.text
                 }
-                val trans = state.translatedLines?.getOrNull(lineIdx)?.takeIf { it.isNotBlank() }
-                return if (trans != null) "$original\n$trans" else original
+
+                // Visible length ignores the karaoke brackets.
+                val visibleLen = full.count { it != '【' && it != '】' }
+                if (visibleLen <= SUBTITLE_MAX_CHARS) return combine(full, trans)
+
+                val chunks = splitIntoChunks(full, SUBTITLE_MAX_CHARS)
+                val idx = if (karaoke && full.contains('【')) {
+                    // Follow the word being sung: show the chunk that holds the opening bracket.
+                    // Chunks were cut from single-space-separated words, so offsets add up.
+                    val markerPos = full.indexOf('【')
+                    var offset = 0
+                    var found = chunks.lastIndex
+                    for (i in chunks.indices) {
+                        val end = offset + chunks[i].length
+                        if (markerPos < end) { found = i; break }
+                        offset = end + 1
+                    }
+                    found
+                } else {
+                    val next = state.lines.getOrNull(lineIdx + 1)?.timeMs
+                    val span = ((next ?: (line.timeMs + CHUNK_SPAN_CAP_MS)) - line.timeMs)
+                        .coerceIn(1L, CHUNK_SPAN_CAP_MS)
+                    val fraction = ((posMs - line.timeMs).toFloat() / span).coerceIn(0f, 0.999f)
+                    pickChunk(chunks, fraction)
+                }
+                return combine(chunks[idx], trans?.let { translationAt(it, chunks.size, idx) })
             }
         }
 
@@ -457,7 +559,13 @@ class LyricsBrowserService : MediaBrowserServiceCompat() {
             } else { 0 }
             val original = state.lines[idx].text
             val trans = state.translatedLines?.getOrNull(idx)?.takeIf { it.isNotBlank() }
-            return if (trans != null) "$original\n$trans" else original
+
+            val chunks = splitIntoChunks(original, SUBTITLE_MAX_CHARS)
+            if (chunks.size <= 1 || durationMs <= 0) return combine(chunks[0], trans?.let { translationAt(it, chunks.size, 0) })
+            val lineSpan = (durationMs.toFloat() / state.lines.size).coerceAtLeast(1f)
+            val within = ((posMs - idx * lineSpan) / lineSpan).coerceIn(0f, 0.999f)
+            val ci = pickChunk(chunks, within)
+            return combine(chunks[ci], trans?.let { translationAt(it, chunks.size, ci) })
         }
 
         return when (state.status) {

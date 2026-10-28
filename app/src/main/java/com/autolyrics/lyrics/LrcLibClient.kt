@@ -6,6 +6,7 @@ import com.google.gson.reflect.TypeToken
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 object LrcLibClient {
@@ -21,6 +22,8 @@ object LrcLibClient {
     private const val AUTO_MATCH_THRESHOLD = 0.85
     private const val MIN_PICKER_SCORE = 0.35
     private const val MAX_CANDIDATES = 30
+    private const val MAX_RETRIES = 2
+    private const val RETRY_PAUSE_MS = 700L
 
     data class LrcLibResponse(
         @SerializedName("id") val id: Int?,
@@ -162,16 +165,7 @@ object LrcLibClient {
             .header("User-Agent", USER_AGENT)
             .build()
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val type = object : TypeToken<List<LrcLibResponse>>() {}.type
-                    gson.fromJson(response.body?.string(), type) ?: emptyList()
-                } else emptyList()
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        return parseList(fetchBody(request))
     }
 
     private fun withinDuration(result: LrcLibResponse, durationSec: Int): Boolean {
@@ -196,14 +190,64 @@ object LrcLibClient {
             .header("User-Agent", USER_AGENT)
             .build()
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    gson.fromJson(response.body?.string(), LrcLibResponse::class.java)
-                } else null
+        return parseObject(fetchBody(request))
+    }
+
+    /** Loads one LRCLIB entry by its id (the number in lrclib.net/tracks/<id>). Network call. */
+    fun getById(id: Int): LrcLibResponse? {
+        val request = Request.Builder()
+            .url("$BASE_URL/get/$id")
+            .header("User-Agent", USER_AGENT)
+            .build()
+        return parseObject(fetchBody(request))
+    }
+
+    /**
+     * Runs the request and returns the body, or null. Network errors, HTTP 429 and 5xx are retried
+     * a couple of times with a short pause, because on mobile networks they are usually transient
+     * (this is what used to make well-known songs randomly come back as "not found").
+     * Other errors, such as 404, are final and not retried.
+     */
+    private fun fetchBody(request: Request): String? {
+        var attempt = 0
+        while (true) {
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) return response.body?.string()
+                    val code = response.code
+                    if (code != 429 && code < 500) return null
+                }
+            } catch (_: IOException) {
+                // retry below
+            } catch (_: RuntimeException) {
+                return null
             }
+            attempt++
+            if (attempt > MAX_RETRIES) return null
+            try {
+                Thread.sleep(RETRY_PAUSE_MS * attempt)
+            } catch (_: InterruptedException) {
+                return null
+            }
+        }
+    }
+
+    private fun parseObject(body: String?): LrcLibResponse? {
+        if (body.isNullOrBlank()) return null
+        return try {
+            gson.fromJson(body, LrcLibResponse::class.java)
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun parseList(body: String?): List<LrcLibResponse> {
+        if (body.isNullOrBlank()) return emptyList()
+        return try {
+            val type = object : TypeToken<List<LrcLibResponse>>() {}.type
+            gson.fromJson<List<LrcLibResponse>>(body, type) ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -220,15 +264,6 @@ object LrcLibClient {
             .header("User-Agent", USER_AGENT)
             .build()
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val type = object : TypeToken<List<LrcLibResponse>>() {}.type
-                    gson.fromJson(response.body?.string(), type) ?: emptyList()
-                } else emptyList()
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        return parseList(fetchBody(request))
     }
 }

@@ -32,6 +32,12 @@
             android:exported="false"
             android:theme="@style/Theme.AutoLyrics" />
 
+        <!-- In-app LRCLIB search page for choosing lyrics -->
+        <activity
+            android:name=".LyricsPickerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AutoLyrics" />
+
         <!-- Notification Listener for Media Session access -->
         <service
             android:name=".media.MediaListenerService"

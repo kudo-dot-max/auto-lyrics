@@ -285,7 +285,13 @@ class MediaTracker private constructor(context: Context) {
                     }
                 }
 
-                val result = fetchFromSyncLrc(track) ?: fetchFromLrcLib(track)
+                val firstTry = fetchFromSyncLrc(track) ?: fetchFromLrcLib(track)
+                // Failures on mobile networks are often transient, so try once more after a
+                // short pause before showing "not found".
+                val result = firstTry ?: if (cached == null) {
+                    delay(RETRY_PAUSE_MS)
+                    fetchFromSyncLrc(track) ?: fetchFromLrcLib(track)
+                } else null
 
                 withContext(Dispatchers.Main) {
                     if (_state.value.track != track) return@withContext
@@ -436,6 +442,24 @@ class MediaTracker private constructor(context: Context) {
         return null
     }
 
+    /** Looks the lyrics up again when the current track ended up "not found" or "error". */
+    fun refetchLyrics() {
+        val current = _state.value
+        val track = current.track ?: return
+        if (current.status != LyricsStatus.NOT_FOUND && current.status != LyricsStatus.ERROR) return
+        translationJob?.cancel()
+        _state.value = current.copy(
+            lines = emptyList(),
+            currentIndex = -1,
+            currentWordIndex = -1,
+            status = LyricsStatus.LOADING,
+            source = "",
+            translatedLines = null,
+            detectedLanguage = null
+        )
+        fetchLyrics(track)
+    }
+
     /** True when the lyrics for the current track were picked by hand. */
     fun isLyricsPinned(): Boolean {
         val track = _state.value.track ?: return false
@@ -530,6 +554,7 @@ class MediaTracker private constructor(context: Context) {
 
     companion object {
         private const val CACHE_REFRESH_MS = 7L * 24 * 60 * 60 * 1000
+        private const val RETRY_PAUSE_MS = 3000L
 
         @Volatile
         private var instance: MediaTracker? = null

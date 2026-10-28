@@ -126,14 +126,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnChooseLyrics = findViewById(R.id.btn_choose_lyrics)
-        btnChooseLyrics.setOnClickListener { showLyricsPicker() }
+        btnChooseLyrics.setOnClickListener { openWebLyricsPicker() }
+        // Long-press: quick built-in list (works without opening the website)
+        btnChooseLyrics.setOnLongClickListener {
+            showLyricsPicker()
+            true
+        }
 
         btnRefreshSessions = findViewById(R.id.btn_refresh_sessions)
         btnRefreshSessions.setOnClickListener {
+            // Re-read the player session and, if the lyrics were not found, look them up again.
             val ok = MediaListenerService.refreshNow(this)
+            val status = mediaTracker.state.value.status
+            if (status == LyricsStatus.NOT_FOUND || status == LyricsStatus.ERROR) {
+                mediaTracker.refetchLyrics()
+            }
             Toast.makeText(
                 this,
-                if (ok) "Checking for playing music…" else "Notification access is not enabled",
+                if (ok) "Refreshing…" else "Notification access is not enabled",
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -274,8 +284,6 @@ class MainActivity : AppCompatActivity() {
                     applyThemeColors(state.albumColors)
                     btnChooseLyrics.visibility =
                         if (state.track != null) View.VISIBLE else View.GONE
-                    btnRefreshSessions.visibility =
-                        if (state.track == null) View.VISIBLE else View.GONE
 
                     if (state.track != null) {
                         val artistText = if (state.track.artist.isNotBlank())
@@ -360,6 +368,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    /** Opens the LRCLIB website, searched for the current song; tapping a result installs it. */
+    private fun openWebLyricsPicker() {
+        val track = mediaTracker.state.value.track ?: return
+        startActivity(
+            Intent(this, LyricsPickerActivity::class.java)
+                .putExtra(LyricsPickerActivity.EXTRA_TITLE, track.title)
+                .putExtra(LyricsPickerActivity.EXTRA_ARTIST, track.artist)
+        )
+    }
 
     private fun formatCandidate(c: TrackMatcher.Candidate): String {
         val r = c.response
