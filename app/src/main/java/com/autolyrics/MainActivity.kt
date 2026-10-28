@@ -19,8 +19,13 @@ import android.content.SharedPreferences
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.LinearInterpolator
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.ImageButton
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import com.autolyrics.lyrics.TrackMatcher
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -47,6 +52,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvAppSubtitle: TextView
     private lateinit var tvStatus: TextView
     private lateinit var btnPermission: Button
+    private lateinit var btnChooseLyrics: Button
+    private var pickerJob: kotlinx.coroutines.Job? = null
     private lateinit var ivAlbumArt: ImageView
     private lateinit var tvTrack: TextView
     private lateinit var tvSource: TextView
@@ -115,6 +122,9 @@ class MainActivity : AppCompatActivity() {
         btnPermission.setOnClickListener {
             startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
         }
+
+        btnChooseLyrics = findViewById(R.id.btn_choose_lyrics)
+        btnChooseLyrics.setOnClickListener { showLyricsPicker() }
 
         findViewById<Button>(R.id.btn_delay_minus).setOnClickListener {
             mediaTracker.adjustOffset(-100)
@@ -237,6 +247,8 @@ class MainActivity : AppCompatActivity() {
                     updateDelayDisplay(state.offsetMs)
                     updateAlbumArt(state)
                     applyThemeColors(state.albumColors)
+                    btnChooseLyrics.visibility =
+                        if (state.track != null) View.VISIBLE else View.GONE
 
                     if (state.track != null) {
                         val artistText = if (state.track.artist.isNotBlank())
@@ -275,7 +287,7 @@ class MainActivity : AppCompatActivity() {
                             tvLyrics.text = "Loading lyrics…"
                         }
                         LyricsStatus.NOT_FOUND -> {
-                            tvLyrics.text = "No lyrics found for this track."
+                            tvLyrics.text = "No lyrics found for this track.\n\nTap \"Choose lyrics\" to pick one from LRCLIB yourself."
                         }
                         LyricsStatus.ERROR -> {
                             tvLyrics.text = "Error loading lyrics.\nCheck your internet connection."
@@ -317,6 +329,83 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun formatCandidate(c: TrackMatcher.Candidate): String {
+        val r = c.response
+        val title = r.trackName ?: "?"
+        val artist = r.artistName ?: "?"
+        val album = r.albumName?.takeIf { it.isNotBlank() }
+        val dur = r.duration?.let { "%d:%02d".format(it / 60, it % 60) }
+        val kind = if (!r.syncedLyrics.isNullOrBlank()) "Synced" else "Plain"
+        val meta = listOfNotNull(album, dur, kind, "${c.percent}% match").joinToString(" · ")
+        return "$title\n$artist\n$meta"
+    }
+
+    /** Searches LRCLIB and lets the user pick which lyrics to use for the current track. */
+    private fun showLyricsPicker() {
+        val track = mediaTracker.state.value.track ?: return
+        pickerJob?.cancel()
+        btnChooseLyrics.isEnabled = false
+        Toast.makeText(this, "Searching LRCLIB…", Toast.LENGTH_SHORT).show()
+
+        pickerJob = lifecycleScope.launch {
+            val candidates = try {
+                mediaTracker.searchLyricsCandidates()
+            } finally {
+                btnChooseLyrics.isEnabled = true
+            }
+            if (isFinishing || isDestroyed) return@launch
+
+            val pinned = mediaTracker.isLyricsPinned()
+            val artistText = track.artist.ifBlank { "Unknown Artist" }
+
+            if (candidates.isEmpty()) {
+                val b = AlertDialog.Builder(this@MainActivity)
+                    .setTitle("No lyrics found")
+                    .setMessage("LRCLIB has nothing for \"${track.title}\" by $artistText.")
+                    .setPositiveButton("OK", null)
+                if (pinned) {
+                    b.setNeutralButton("Use automatic") { _, _ -> mediaTracker.resetLyricsChoice() }
+                }
+                b.show()
+                return@launch
+            }
+
+            val labels = candidates.map { formatCandidate(it) }
+            val adapter = object : ArrayAdapter<String>(
+                this@MainActivity, android.R.layout.simple_list_item_1, labels
+            ) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val v = super.getView(position, convertView, parent) as TextView
+                    v.isSingleLine = false
+                    v.maxLines = 5
+                    v.setPadding(dp(20), dp(10), dp(20), dp(10))
+                    return v
+                }
+            }
+
+            val builder = AlertDialog.Builder(this@MainActivity)
+                .setTitle("Lyrics for: ${track.title}")
+                .setAdapter(adapter) { _, which ->
+                    if (mediaTracker.state.value.track != track) {
+                        Toast.makeText(
+                            this@MainActivity, "The song changed. Try again.", Toast.LENGTH_SHORT
+                        ).show()
+                    } else if (!mediaTracker.applyLyricsCandidate(candidates[which].response)) {
+                        Toast.makeText(
+                            this@MainActivity, "That entry has no usable lyrics.", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+            if (pinned) {
+                builder.setNeutralButton("Use automatic") { _, _ -> mediaTracker.resetLyricsChoice() }
+            }
+            builder.show()
         }
     }
 

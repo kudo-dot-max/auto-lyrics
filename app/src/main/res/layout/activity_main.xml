@@ -126,6 +126,24 @@
         android:paddingBottom="2dp">
 
         <Button
+            android:id="@+id/btn_choose_lyrics"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:text="🔍 Choose lyrics"
+            android:textSize="11sp"
+            android:textColor="#CCCCDD"
+            android:backgroundTint="#2A2A3E"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:textAllCaps="false"
+            android:minWidth="0dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:layout_marginEnd="8dp"
+            android:visibility="gone"
+            style="?attr/materialButtonOutlinedStyle" />
+
+        <Button
             android:id="@+id/btn_performance_mode"
             android:layout_width="wrap_content"
             android:layout_height="34dp"

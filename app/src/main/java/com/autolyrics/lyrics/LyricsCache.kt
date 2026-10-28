@@ -21,7 +21,9 @@ class LyricsCache(context: Context) {
         val lines: List<CachedLine>,
         val status: String,
         val source: String,
-        val timestamp: Long
+        val timestamp: Long,
+        // true when the user picked these lyrics manually; never refreshed or overwritten automatically
+        val pinned: Boolean = false
     )
 
     data class CachedLine(
@@ -61,7 +63,34 @@ class LyricsCache(context: Context) {
         }
     }
 
-    fun put(title: String, artist: String, lines: List<LyricLine>, status: LyricsStatus, source: String) {
+    fun isPinned(title: String, artist: String): Boolean {
+        val file = cacheFile(title, artist)
+        if (!file.exists()) return false
+        return try {
+            gson.fromJson(file.readText(), CachedResult::class.java)?.pinned == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun remove(title: String, artist: String) {
+        try {
+            cacheFile(title, artist).delete()
+        } catch (_: Exception) {
+            // non-fatal
+        }
+    }
+
+    fun put(
+        title: String,
+        artist: String,
+        lines: List<LyricLine>,
+        status: LyricsStatus,
+        source: String,
+        pinned: Boolean = false
+    ) {
+        // Automatic fetches must not overwrite lyrics the user picked by hand.
+        if (!pinned && isPinned(title, artist)) return
         try {
             val cached = CachedResult(
                 lines = lines.map { line ->
@@ -73,7 +102,8 @@ class LyricsCache(context: Context) {
                 },
                 status = status.name,
                 source = source,
-                timestamp = System.currentTimeMillis()
+                timestamp = System.currentTimeMillis(),
+                pinned = pinned
             )
             val file = cacheFile(title, artist)
             file.writeText(gson.toJson(cached))
@@ -88,7 +118,7 @@ class LyricsCache(context: Context) {
         return try {
             val json = file.readText()
             val cached = gson.fromJson(json, CachedResult::class.java)
-            System.currentTimeMillis() - cached.timestamp
+            if (cached.pinned) 0L else System.currentTimeMillis() - cached.timestamp
         } catch (_: Exception) {
             Long.MAX_VALUE
         }

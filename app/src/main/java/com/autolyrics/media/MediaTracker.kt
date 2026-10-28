@@ -15,6 +15,7 @@ import com.autolyrics.lyrics.LyricsCache
 import com.autolyrics.lyrics.LyricsTranslator
 import com.autolyrics.lyrics.MetadataCleaner
 import com.autolyrics.lyrics.SyncLrcClient
+import com.autolyrics.lyrics.TrackMatcher
 import com.autolyrics.model.LyricLine
 import com.autolyrics.model.LyricsState
 import com.autolyrics.model.LyricsStatus
@@ -415,6 +416,10 @@ class MediaTracker private constructor(context: Context) {
             null
         } ?: return null
 
+        return lrcLibToFetchResult(result)
+    }
+
+    private fun lrcLibToFetchResult(result: LrcLibClient.LrcLibResponse): FetchResult? {
         if (result.syncedLyrics != null) {
             val lines = LrcParser.parse(result.syncedLyrics)
             val hasRealText = lines.any { it.text != "♪" && it.text.isNotBlank() }
@@ -429,6 +434,80 @@ class MediaTracker private constructor(context: Context) {
         }
 
         return null
+    }
+
+    /** True when the lyrics for the current track were picked by hand. */
+    fun isLyricsPinned(): Boolean {
+        val track = _state.value.track ?: return false
+        return lyricsCache.isPinned(track.title, track.artist)
+    }
+
+    /** Ranked LRCLIB candidates for the current track (network; safe to call from the main thread). */
+    suspend fun searchLyricsCandidates(): List<TrackMatcher.Candidate> {
+        val track = _state.value.track ?: return emptyList()
+        val durationSec = if (track.durationMs > 0) (track.durationMs / 1000).toInt() else 0
+        return withContext(Dispatchers.IO) {
+            try {
+                LrcLibClient.searchCandidates(track.title, track.artist, durationSec)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+    }
+
+    /**
+     * Uses the lyrics the user picked for the current track and remembers the choice
+     * (it is not refreshed or replaced automatically). Returns false if the entry has no usable lyrics.
+     */
+    fun applyLyricsCandidate(candidate: LrcLibClient.LrcLibResponse): Boolean {
+        val track = _state.value.track ?: return false
+        val result = lrcLibToFetchResult(candidate) ?: return false
+        val source = "${result.source} · picked"
+
+        fetchJob?.cancel()
+        translationJob?.cancel()
+        scope.launch(Dispatchers.IO) {
+            lyricsCache.put(track.title, track.artist, result.lines, result.status, source, pinned = true)
+        }
+        _state.value = _state.value.copy(
+            lines = result.lines,
+            currentIndex = -1,
+            currentWordIndex = -1,
+            status = result.status,
+            source = source,
+            translatedLines = null,
+            detectedLanguage = null
+        )
+        if (result.status == LyricsStatus.FOUND) {
+            updateCurrentPosition()
+        }
+        translateIfNeeded(result.lines, track)
+        return true
+    }
+
+    /** Forgets a manual choice for the current track and goes back to automatic lookup. */
+    fun resetLyricsChoice() {
+        val track = _state.value.track ?: return
+        fetchJob?.cancel()
+        translationJob?.cancel()
+        scope.launch(Dispatchers.IO) {
+            lyricsCache.remove(track.title, track.artist)
+            withContext(Dispatchers.Main) {
+                if (_state.value.track != track) return@withContext
+                _state.value = _state.value.copy(
+                    lines = emptyList(),
+                    currentIndex = -1,
+                    currentWordIndex = -1,
+                    status = LyricsStatus.LOADING,
+                    source = "",
+                    translatedLines = null,
+                    detectedLanguage = null
+                )
+                fetchLyrics(track)
+            }
+        }
     }
 
     private fun translateIfNeeded(lines: List<LyricLine>, track: TrackInfo) {

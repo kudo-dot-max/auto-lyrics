@@ -18,6 +18,9 @@ object LrcLibClient {
     private val gson = Gson()
     private const val BASE_URL = "https://lrclib.net/api"
     private const val USER_AGENT = "AutoLyrics v1.0 (https://github.com/user/auto-lyrics)"
+    private const val AUTO_MATCH_THRESHOLD = 0.85
+    private const val MIN_PICKER_SCORE = 0.35
+    private const val MAX_CANDIDATES = 30
 
     data class LrcLibResponse(
         @SerializedName("id") val id: Int?,
@@ -55,6 +58,12 @@ object LrcLibClient {
             if (exactNoAlbum?.syncedLyrics != null) return exactNoAlbum
         }
 
+        // Priority 3b: alternative spellings (feat. tags, joined artists, swapped fields).
+        // Computed once, only when the steps above found nothing.
+        val altCandidates by lazy { alternativeCandidates(trackName, artistName, durationSec) }
+        altCandidates.firstOrNull { !it.response.syncedLyrics.isNullOrBlank() }
+            ?.let { return it.response }
+
         // Priority 4: exact match with any lyrics (including plain)
         if (durationSec > 0 && albumName.isNotBlank()) {
             val exact = getExact(trackName, artistName, albumName, durationSec)
@@ -67,7 +76,102 @@ object LrcLibClient {
         }
         if (plainResult != null) return plainResult
 
+        // Fallback: plain lyrics from the alternative spellings tried above
+        altCandidates.firstOrNull { !it.response.plainLyrics.isNullOrBlank() }
+            ?.let { return it.response }
+
         return null
+    }
+
+    /**
+     * Retries the search with cleaned-up spellings (no "feat." / remaster suffix, first artist only)
+     * and a free-text query, keeping only results that are a confident match for the played track.
+     */
+    private fun alternativeCandidates(
+        trackName: String,
+        artistName: String,
+        durationSec: Int
+    ): List<TrackMatcher.Candidate> {
+        val altTitle = TrackMatcher.stripFeat(trackName)
+        val altArtist = TrackMatcher.firstArtist(artistName)
+        val tried = mutableSetOf(trackName to artistName)
+        val found = LinkedHashMap<Int, LrcLibResponse>()
+
+        val variants = listOf(
+            altTitle to artistName,
+            trackName to altArtist,
+            altTitle to altArtist
+        )
+        for ((t, a) in variants) {
+            if (!tried.add(t to a)) continue
+            for (r in searchAll(t, a)) {
+                val id = r.id ?: continue
+                found.putIfAbsent(id, r)
+            }
+        }
+        for (r in searchFree("$altArtist $altTitle")) {
+            val id = r.id ?: continue
+            found.putIfAbsent(id, r)
+        }
+
+        return TrackMatcher.rank(trackName, artistName, durationSec, found.values)
+            .filter { it.score >= AUTO_MATCH_THRESHOLD && withinDuration(it.response, durationSec) }
+    }
+
+    /**
+     * Candidate lyrics for the manual picker: several searches merged, best match first.
+     * Network call; run off the main thread.
+     */
+    fun searchCandidates(
+        trackName: String,
+        artistName: String,
+        durationSec: Int
+    ): List<TrackMatcher.Candidate> {
+        val title = TrackMatcher.stripFeat(trackName)
+        val artist = TrackMatcher.firstArtist(artistName)
+        val found = LinkedHashMap<Int, LrcLibResponse>()
+
+        fun addAll(list: List<LrcLibResponse>) {
+            for (r in list) {
+                val id = r.id ?: continue
+                found.putIfAbsent(id, r)
+            }
+        }
+
+        val freeQueries = linkedSetOf(
+            "$artistName $trackName".trim(),
+            "$artist $title".trim(),
+            title
+        )
+        for (q in freeQueries) addAll(searchFree(q))
+        addAll(searchAll(trackName, artistName))
+        if (title != trackName || artist != artistName) addAll(searchAll(title, artist))
+
+        return TrackMatcher.rank(trackName, artistName, durationSec, found.values)
+            .filter { it.score >= MIN_PICKER_SCORE }
+            .take(MAX_CANDIDATES)
+    }
+
+    private fun searchFree(query: String): List<LrcLibResponse> {
+        if (query.isBlank()) return emptyList()
+        val urlBuilder = "$BASE_URL/search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", query.trim())
+
+        val request = Request.Builder()
+            .url(urlBuilder.build())
+            .header("User-Agent", USER_AGENT)
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val type = object : TypeToken<List<LrcLibResponse>>() {}.type
+                    gson.fromJson(response.body?.string(), type) ?: emptyList()
+                } else emptyList()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun withinDuration(result: LrcLibResponse, durationSec: Int): Boolean {
